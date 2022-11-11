@@ -1,4 +1,5 @@
 #include <vector>
+#include <unordered_map>
 #include <iostream>
 #include <fstream>
 #include <regex>
@@ -22,7 +23,6 @@ std::vector<std::string> split(const std::string &s, char seperator) {
 namespace pgrank {
 
 template<typename maptask>
-
 class datasource : public mapreduce::detail::noncopyable {
 public:
     // pass hyperlink as an rval
@@ -76,9 +76,9 @@ mapreduce::job<pgrank::map_task,
 job;
 
 // parses hyper link file
-std::vector<std::pair<std::uint32_t, std::uint32_t>> 
-parse_hlfile(std::istream &input_file) {
-    std::vector<std::pair<std::uint32_t, std::uint32_t>> hyperlink_input;
+void
+parse_hlfile(std::istream &input_file, std::vector<std::pair<std::uint32_t, std::uint32_t>> &hyperlink_input) {
+    assert(hyperlink_input.empty());
     std::string line;
     std::regex p("(0|[1-9][0-9]*)\\s(0|[1-9][0-9]*)$");
     unsigned int i = 0;
@@ -95,11 +95,10 @@ parse_hlfile(std::istream &input_file) {
                                 );
         i++;
     }
-    return hyperlink_input;
 }
 
 void run(std::vector<std::vector<std::uint32_t>> incoming,
-        std::vector<std::uint32_t> num_outgoing,
+        std::unordered_map<std::uint32_t, std::uint32_t> num_outgoing,
         double convergence,
         int max_iterations,
         double alpha) {
@@ -171,8 +170,31 @@ void run(std::vector<std::vector<std::uint32_t>> incoming,
 };   // namespace pgrank
 
 
+int main(int argc, char **argv) {
+    if (argc != 4) {
+        std::cerr << "Usage : ./mr-pr-cpp.o ${filename}.txt -o ${filename}-pr-cpp.txt" << std::endl;
+        exit(1);
+    }
+    if (strcmp(argv[2], "-o")) {
+        std::cerr << "flag `-o` expected but provided `" << argv[2] << "`" << std::endl;
+    }
+    // argc == 4 and !strcmp(argv[2], "-o")
 
+    std::filebuf fb1;
+    if (fb1.open(argv[1], std::ios::in)) {
+        std::istream input_stream(&fb1);
+        std::vector<std::pair<std::uint32_t, std::uint32_t>> hyperlink;
+        pgrank::parse_hlfile(input_stream, hyperlink);
 
+        std::unordered_map<std::uint32_t, std::uint32_t> num_outgoing;
+        for(unsigned i = 0;i < hyperlink.size();i++) {
+            num_outgoing[hyperlink[i].first]++; // FIXME : potential bug here, make it more precise
+        }
+        // mapreduce library stuff to get incoming matrix
+
+    }
+
+}
 
 
 
