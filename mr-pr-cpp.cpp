@@ -34,7 +34,7 @@ class datasource : public mapreduce::detail::noncopyable {
 public:
     // pass hyperlink as an rval
     datasource(std::string filename, 
-            std::vector<std::pair<std::uint32_t, std::uint32_t>> &hyperlink) : filename(filename), hyperlink(hyperlink) {};
+            std::vector<std::pair<std::uint32_t, std::uint32_t>> &hyperlink) : filename(filename), hyperlink(std::move(hyperlink)) {};
 
     bool const setup_key(typename maptask::key_type &key) {
         key = filename; // key isn't really that important for map
@@ -46,15 +46,16 @@ public:
     };
 
     bool const get_data(typename maptask::key_type const &/*key*/, typename maptask::value_type &value) {
-        value = hyperlink;
+        value = std::move(hyperlink);
         return true;
     }
 
 private:
     std::string filename;
-    std::vector<std::pair<std::uint32_t, std::uint32_t>> hyperlink;
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> hyperlink; // useless after one get data
 };
 
+// there is exactly one map worker
 struct map_task : public mapreduce::map_task<std::string,                                                    // map key   - filename 
                                             std::vector<std::pair<std::uint32_t, std::uint32_t>> >   {      // map value - memory mapped file contents (list of pairs val.first --> val.second)  
                                             
@@ -211,16 +212,17 @@ int main(int argc, char **argv) {
 
         mapreduce::specification spec;
         spec.map_tasks = 1;
-        spec.reduce_tasks = 1;  // std::max(1U, std::thread::hardware_concurrency());
+        spec.reduce_tasks = std::max(1U, std::thread::hardware_concurrency());
 
         pgrank::job::datasource_type datasource(std::string(argv[1]), hyperlink);
+        // hyperlink is destroyed now
 
         pgrank::job job(datasource, spec);
         mapreduce::results result;
 
         // job run sequential policy
 
-        job.run<mapreduce::schedule_policy::sequential<pgrank::job>> (result);
+        job.run<mapreduce::schedule_policy::cpu_parallel<pgrank::job>> (result);
         std::cout <<"\nMapReduce job finished in " << result.job_runtime.count() << "s with " << std::distance(job.begin_results(), job.end_results()) << " results\n\n";
         
         std::vector<std::vector<std::uint32_t>> incoming(websize);
@@ -239,7 +241,6 @@ int main(int argc, char **argv) {
         //     printf("\n");
         // }
         // ===== DEBUG verify incoming vector =====
-
 
         // incoming, num_outgoing sets are set up now
         auto start = std::chrono::high_resolution_clock::now();

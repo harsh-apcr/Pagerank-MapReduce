@@ -32,7 +32,7 @@ int main(int argc, char **argv) {
     if (fb1.open(argv[1], std::ios::in) && fb2.open(argv[2], std::ios::in)) {
         std::istream ins1(&fb1), ins2(&fb2);
         std::string line1, line2;
-        std::regex p("((0|[1-9][0-9]*)|s)\\s=\\s([0-9]*[.])?[0-9]+");
+        std::regex p("((0|[1-9][0-9]*)|s)\\s=\\s([0-9]*[.])?[0-9]+(e[+|-]?[0-9]+)?");
         unsigned i = 0;
         while (std::getline(ins1, line1) && std::getline(ins2, line2)) {
             if (!std::regex_match(line1, p) || !std::regex_match(line2, p)) {
