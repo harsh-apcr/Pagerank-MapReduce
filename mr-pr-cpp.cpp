@@ -4,8 +4,15 @@
 #include <fstream>
 #include <regex>
 #include <string>
+#include <numeric>
+#include <chrono>
 #include "include/mapreduce.hpp"
 
+const double DEFAULT_ALPHA = 0.85;
+const double DEFAULT_CONVERGENCE = 0.00001;
+const unsigned long DEFAULT_MAX_ITERATIONS = 10000;
+
+static bool is_setup = false;
 
 // split function for `std::string` based on a `char` separator , courtesy : stackoverflow
 std::vector<std::string> split(const std::string &s, char seperator) {
@@ -26,12 +33,16 @@ template<typename maptask>
 class datasource : public mapreduce::detail::noncopyable {
 public:
     // pass hyperlink as an rval
-    datasource(std::string &filename, 
-            std::vector<std::pair<std::uint32_t, std::uint32_t>> &&hyperlink) : filename(filename), hyperlink(hyperlink) {};
+    datasource(std::string filename, 
+            std::vector<std::pair<std::uint32_t, std::uint32_t>> &hyperlink) : filename(filename), hyperlink(hyperlink) {};
 
     bool const setup_key(typename maptask::key_type &key) {
         key = filename; // key isn't really that important for map
-        return true;
+        if (!is_setup) {
+            is_setup = true;
+            return true;
+        }
+        return false;
     };
 
     bool const get_data(typename maptask::key_type const &/*key*/, typename maptask::value_type &value) {
@@ -44,7 +55,7 @@ private:
     std::vector<std::pair<std::uint32_t, std::uint32_t>> hyperlink;
 };
 
-class map_task : public mapreduce::map_task<std::string,                                                    // map key   - filename 
+struct map_task : public mapreduce::map_task<std::string,                                                    // map key   - filename 
                                             std::vector<std::pair<std::uint32_t, std::uint32_t>> >   {      // map value - memory mapped file contents (list of pairs val.first --> val.second)  
                                             
     template<typename Runtime>
@@ -56,15 +67,13 @@ class map_task : public mapreduce::map_task<std::string,                        
 
 };
 
-class reduce_task : public mapreduce::reduce_task<std::uint32_t,      // key type for result of reduce phase (a page id)
-                                     std::vector<std::uint32_t>> {    // value type for result of reduce phase (list of page ids that are pointing to key)
+struct reduce_task : public mapreduce::reduce_task<std::uint32_t,      // key type for result of reduce phase (a page id)
+                                                std::uint32_t> {    // value type for result of reduce phase (list of page ids that are pointing to key)
     template<typename Runtime, typename It>
     void operator()(Runtime &runtime,key_type const &key, It it, It ite) {
-        std::vector<std::uint32_t> pages;
-        for(auto itr = it; itr != ite; itr++) {
-            pages.push_back(*itr);
+        for(auto itr = it;itr != ite;itr++) {
+            runtime.emit(key, *itr);
         }
-        runtime.emit(key, pages);
     }
 };
 
@@ -97,7 +106,8 @@ parse_hlfile(std::istream &input_file, std::vector<std::pair<std::uint32_t, std:
     }
 }
 
-void run(std::vector<std::vector<std::uint32_t>> incoming,
+std::vector<double>
+run(std::vector<std::vector<std::uint32_t>> incoming,
         std::unordered_map<std::uint32_t, std::uint32_t> num_outgoing,
         double convergence,
         int max_iterations,
@@ -164,6 +174,8 @@ void run(std::vector<std::vector<std::uint32_t>> incoming,
 
         num_iterations++;
     }
+
+    return pr;
 }
 
 
@@ -187,27 +199,75 @@ int main(int argc, char **argv) {
         pgrank::parse_hlfile(input_stream, hyperlink);
 
         std::unordered_map<std::uint32_t, std::uint32_t> num_outgoing;
+        unsigned int websize = 0;
         for(unsigned i = 0;i < hyperlink.size();i++) {
-            num_outgoing[hyperlink[i].first]++; // FIXME : potential bug here, make it more precise
+            num_outgoing[hyperlink[i].first]++;
+            websize = std::max(hyperlink[i].first, hyperlink[i].second);
         }
+        // websize is largest id of page in web
+        websize++;
+        
         // mapreduce library stuff to get incoming matrix
 
+        mapreduce::specification spec;
+        spec.map_tasks = 1;
+        spec.reduce_tasks = 1;  // std::max(1U, std::thread::hardware_concurrency());
+
+        pgrank::job::datasource_type datasource(std::string(argv[1]), hyperlink);
+
+        pgrank::job job(datasource, spec);
+        mapreduce::results result;
+
+        // job run sequential policy
+
+        job.run<mapreduce::schedule_policy::sequential<pgrank::job>> (result);
+        std::cout <<"\nMapReduce job finished in " << result.job_runtime.count() << "s with " << std::distance(job.begin_results(), job.end_results()) << " results\n\n";
+        
+        std::vector<std::vector<std::uint32_t>> incoming(websize);
+
+        for(auto it = job.begin_results(); it != job.end_results() ; ++it) {
+            int pgid = it->first;
+            incoming[pgid].push_back(it->second);
+        }
+
+        // ===== DEBUG verify incoming vector =====
+        // for(unsigned i = 0;i < websize;i++) {
+        //     printf("incoming for page %d : ", i);
+        //     for(int pg : incoming[i]) {
+        //         printf("%d ", pg);
+        //     }
+        //     printf("\n");
+        // }
+        // ===== DEBUG verify incoming vector =====
+
+
+        // incoming, num_outgoing sets are set up now
+        auto start = std::chrono::high_resolution_clock::now();
+        auto pgrankv = pgrank::run(incoming, num_outgoing, DEFAULT_CONVERGENCE, DEFAULT_MAX_ITERATIONS, DEFAULT_ALPHA);
+        auto end = std::chrono::high_resolution_clock::now();
+
+        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+
+        std::cout << "\nPagerank algorithm finished in " << duration.count() << "us" << std::endl;
+
+        std::filebuf fb2;
+        if (fb2.open(argv[3], std::ios::out)) {
+            std::ostream outs(&fb2);
+            outs << std::setprecision(12);
+            unsigned i = 0;
+            for(auto pr : pgrankv) {
+                outs << i << " = " << pr << std::endl;
+                i++;
+            }
+            double ranksum = 0;
+            for(auto rk : pgrankv)
+                ranksum += rk;
+            outs << "s = " << ranksum;
+        }
+        
     }
+    return 0;
 
 }
-
-
-
-/*
-std::filebuf fb;
-if (fb.open(filename, std::ios::in)) {
-    std::istream input_stream(&fb);
-    value = parse_hlfile(input_stream);
-    fb.close();
-    return true;
-} else {
-    return false;
-}
-*/
 
 
