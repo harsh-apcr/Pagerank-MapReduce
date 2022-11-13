@@ -106,7 +106,7 @@ public:
         do {
             MPI_Recv(recvbuf, 2, MPI_INT, 1/*map worker*/, 0, MPI_COMM_WORLD, &status);
             res = recvbuf[0];
-            if (res > 0) 
+            if (res >= 0) 
                 part_incoming[recvbuf[0]].push_back(recvbuf[1]);
 
         } while (res != -1);
@@ -338,10 +338,3 @@ int main(int argc, char **argv) {
     }
     return 0;
 }
-
-
-
-
-
-
-
