@@ -26,31 +26,38 @@ int main(int argc, char **argv) {
         std::cerr << "Usage : ./checker <filename1> <filename2>" << std::endl;
         exit(1);
     }
-
     std::filebuf fb1;
     std::filebuf fb2;
     if (fb1.open(argv[1], std::ios::in) && fb2.open(argv[2], std::ios::in)) {
         std::istream ins1(&fb1), ins2(&fb2);
         std::string line1, line2;
-        std::regex p("((0|[1-9][0-9]*)|s)\\s=\\s([0-9]*[.])?[0-9]+(e[+|-]?[0-9]+)?");
+        std::regex p("((0|[1-9][0-9]*)|s)\\s=\\s([0-9]*[.])?[0-9]+((e|E)[+|-]?[0-9]+)?");
         unsigned i = 0;
+        std::vector<std::string> split1, split2;
         while (std::getline(ins1, line1) && std::getline(ins2, line2)) {
             if (!std::regex_match(line1, p) || !std::regex_match(line2, p)) {
                 std::cerr << "invalid input at line number : " << i+1 << std::endl;
                 exit(1);
             }
-            double r1 = std::stod(split(line1, ' ')[2]);
-            double r2 = std::stod(split(line2, ' ')[2]);
+
+            split1 = split(line1, ' ');
+            split2 = split(line2, ' ');
+            double r1 = std::stod(split1[2]);
+            double r2 = std::stod(split2[2]);
+
             if (fabs(r1 - r2) > 1e-4) {
                 has_diff = true;
                 std::cout <<  
-                    "files do not match at line number : " <<  i+1 << ", difference is more than 1e-4" 
+                    "warning: files do not match at line number : " <<  i+1 << ", difference is more than 1e-4" 
                     << std::endl;
+                std::cout << "file 1 : " << line1 << std::endl;
+                std::cout << "file 2 : " << line2 << std::endl;
             }
             i++;
         }
-
-        std::cout << "check passed successfully" << std::endl;
+        
+        if (!has_diff)
+            std::cout << "check passed successfully" << std::endl;
 
     } else {
         std::cerr << "couldn't open one of the file for checking" << std::endl;
