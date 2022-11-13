@@ -9,6 +9,17 @@
 #include <cmath>
 #include <iomanip>
 #include "mpi.h"
+#include <chrono>
+
+
+#define SEC_TO_NS(sec) ((sec)*1000000000)
+uint64_t nanos()
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+    uint64_t ns = SEC_TO_NS((uint64_t)ts.tv_sec) + (uint64_t)ts.tv_nsec;
+    return ns;
+}
 
 int websize;
 int hlinksize;
@@ -73,8 +84,12 @@ public:
             // sendbuf has key-value pair
             MPI_Send(sendbuf, 2, MPI_UINT32_T, mapreduce::hash(sendbuf[0]) % num_reduce + 2, 0, MPI_COMM_WORLD);
             // send will use eager protocol, so it is fast non-blocking send
-        }
+        }   
         // send is performed `hlinksize / 2` many times
+        int exit = -1;
+        for(unsigned i = 0;i < num_reduce;i++) {
+            MPI_Send(&exit, 1, MPI_INT, i + 2, 0, MPI_COMM_WORLD);
+        }
         return;
     };
 
@@ -86,11 +101,15 @@ class reduce_task {
 public:
     void run_task(std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> &part_incoming) {
         MPI_Status status;
-        std::uint32_t recvbuf[2];
-        for(unsigned i = 0;i < hlinksize/2;i++) {
-            MPI_Recv(recvbuf, 2, MPI_UINT32_T, 1/*map worker*/, 0, MPI_COMM_WORLD, &status);
-            part_incoming[recvbuf[0]].push_back(recvbuf[1]);
-        }
+        int recvbuf[2];
+        int res;
+        do {
+            MPI_Recv(recvbuf, 2, MPI_INT, 1/*map worker*/, 0, MPI_COMM_WORLD, &status);
+            res = recvbuf[0];
+            if (res > 0) 
+                part_incoming[recvbuf[0]].push_back(recvbuf[1]);
+
+        } while (res != -1);
         // we got list(k, list(v))
         return;
     }
@@ -180,23 +199,29 @@ int main(int argc, char **argv) {
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
-    if (argc != 4) {
-        fprintf(stderr, "Usage : ./mr-pr-mpi.o ${filename}.txt -o ${filename}-pr-mpi.txt\n");
-        exit(1);
-    }
-    // argc == 4
-    if (strcmp(argv[2], "-o")) {
-        fprintf(stderr, "flag `-o` expected but provided `%s`\n", argv[2]);
-        exit(1);
-    }
-
-    // only 1 map worker
-    int num_reduce = size - 2;   // 1 master and 1 map-worker
-    if (num_reduce <= 0) {
-        std::cerr << "number of processes spawned must be atleast 3 for doing pgrank using map-reduce" << std::endl;
-        exit(1);
+    if (rank == 0) {
+        if (argc != 4) {
+            fprintf(stderr, "Usage : ./mr-pr-mpi.o ${filename}.txt -o ${filename}-pr-mpi.txt\n");
+            exit(1);
+        }
+        // argc == 4
+        if (strcmp(argv[2], "-o")) {
+            fprintf(stderr, "flag `-o` expected but provided `%s`\n", argv[2]);
+            exit(1);
+        }
     }
     
+    // only 1 map worker
+    int num_reduce = size - 2;   // 1 master and 1 map-worker
+    if (rank == 0) {
+        if (num_reduce <= 0) {
+            std::cerr << "number of processes spawned must be atleast 3 for doing pgrank using map-reduce, but only " << size << " spawned" << std::endl;
+            exit(1);
+        }
+    }
+    
+    uint32_t start, end;
+
     std::filebuf fb1;
     if (fb1.open(argv[1], std::ios::in)) {
         
@@ -237,13 +262,32 @@ int main(int argc, char **argv) {
             // got the number of recv
             int pgid;
             MPI_Status status;
+            uint32_t recvbuf[websize];
             for(unsigned i = 0;i < num_recv;i++) {
                 MPI_Recv(&pgid, 1, MPI_UINT32_T, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, &status);
-                MPI_Recv(&incoming[pgid], websize, MPI_UINT32_T, status.MPI_SOURCE, 1, MPI_COMM_WORLD, &status);
-            }
+                MPI_Recv(recvbuf, websize, MPI_UINT32_T, status.MPI_SOURCE, 1, MPI_COMM_WORLD, &status);
 
+                int count;
+                MPI_Get_count(&status, MPI_UINT32_T, &count);
+                for(int i = 0;i < count;i++) {
+                    incoming[pgid].push_back(recvbuf[i]);
+                }
+            }
+            MPI_Recv(&start, 1, MPI_UINT64_T, 1, 10, MPI_COMM_WORLD, &status);
+            MPI_Recv(&end, 1, MPI_UINT64_T, MPI_ANY_SOURCE, 11, MPI_COMM_WORLD, &status);
+            double time = (end - start) / double(1000000000);
+            std::cout <<"\nMPI-MapReduce job finished in " << time << "s" << std::endl;
+            
             // rank 0 has num_outgoing, incoming
+            auto pgstart = std::chrono::high_resolution_clock::now();
             auto pgrankv = run_pgrank(incoming, num_outgoing, DEFAULT_CONVERGENCE, DEFAULT_MAX_ITERATIONS, DEFAULT_ALPHA);
+            auto pgend = std::chrono::high_resolution_clock::now();
+
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(pgend - pgstart);
+
+            std::cout << "\nPagerank algorithm finished in " << duration.count() << "us" << std::endl;
+
+
 
             std::filebuf fb2;
             if (fb2.open(argv[3], std::ios::out)) {
@@ -261,11 +305,14 @@ int main(int argc, char **argv) {
             }
 
         }
-        if (rank == 1) {
+        else if (rank == 1) {
             mapreduce::map_task map_worker(num_reduce);
+            start = nanos();
             map_worker.run_task(hyperlink);
             num_send = 0;
             MPI_Reduce(&num_send, &num_recv, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+
+            MPI_Send(&start, 1, MPI_UINT64_T, 0, 10, MPI_COMM_WORLD);
         }
         // rank > 1
         else {
@@ -273,15 +320,21 @@ int main(int argc, char **argv) {
             mapreduce::reduce_task reduce_worker;
             std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> part_incoming;
             reduce_worker.run_task(part_incoming);
+            end = nanos();
             // need to send this part_incoming to master
             num_send = part_incoming.size();
             MPI_Reduce(&num_send, &num_recv, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
 
             for(auto const &kv : part_incoming) {
                 MPI_Send(&kv.first, 1, MPI_UINT32_T, 0, 0, MPI_COMM_WORLD); // send key
-                MPI_Send(&kv.second, kv.second.size(), MPI_UINT32_T, 0, 1, MPI_COMM_WORLD);
+                MPI_Send(&kv.second[0], kv.second.size(), MPI_UINT32_T, 0, 1, MPI_COMM_WORLD);
+            }
+
+            if (rank == 2) {
+                MPI_Send(&end, 1, MPI_UINT64_T, 0, 11, MPI_COMM_WORLD);
             }
         }
+        MPI_Finalize();
     }
     return 0;
 }
