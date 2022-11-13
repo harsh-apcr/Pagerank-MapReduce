@@ -203,11 +203,11 @@ int main(int argc, char **argv) {
         unsigned int websize = 0;
         for(unsigned i = 0;i < hyperlink.size();i++) {
             num_outgoing[hyperlink[i].first]++;
-            websize = std::max(hyperlink[i].first, hyperlink[i].second);
+            if (websize < std::max(hyperlink[i].first, hyperlink[i].second))
+                websize = std::max(hyperlink[i].first, hyperlink[i].second);
         }
         // websize is largest id of page in web
         websize++;
-        
         // mapreduce library stuff to get incoming matrix
 
         mapreduce::specification spec;
