@@ -108,8 +108,8 @@ parse_hlfile(std::istream &input_file, std::vector<std::pair<std::uint32_t, std:
 }
 
 std::vector<double>
-run(std::vector<std::vector<std::uint32_t>> incoming,
-        std::unordered_map<std::uint32_t, std::uint32_t> num_outgoing,
+run(std::vector<std::vector<std::uint32_t>> &incoming,
+        std::unordered_map<std::uint32_t, std::uint32_t> &num_outgoing,
         double convergence,
         int max_iterations,
         double alpha) {

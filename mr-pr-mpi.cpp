@@ -43,15 +43,15 @@ std::vector<std::string> split(const std::string &s, char seperator) {
 
 // parses hyper link file
 void
-parse_hlfile(std::istream &input_file, std::vector<std::uint32_t> &hyperlink_input) {
+parse_hlfile(std::istream &input_file, std::vector<std::uint32_t> &hyperlink_input, int rank) {
     assert(hyperlink_input.empty());
     std::string line;
     std::regex p("(0|[1-9][0-9]*)\\s(0|[1-9][0-9]*)$");
     unsigned int i = 0;
     while (std::getline(input_file, line)) {
         if (!std::regex_match(line, p)) {
-            fprintf(stderr, "invalid input at line number : %d", i+1);
-            exit(1);
+            if (rank == 0) fprintf(stderr, "invalid input at line number : %d", i+1);
+            MPI_Abort(MPI_COMM_WORLD,1);
         }
         // regex match
         std::vector<std::string> link = split(line, ' ');
@@ -119,8 +119,8 @@ public:
 };
 
 std::vector<double>
-run_pgrank(std::vector<std::vector<std::uint32_t>> incoming,
-        std::unordered_map<std::uint32_t, std::uint32_t> num_outgoing,
+run_pgrank(std::vector<std::vector<std::uint32_t>> &incoming,
+        std::unordered_map<std::uint32_t, std::uint32_t> &num_outgoing,
         double convergence,
         int max_iterations,
         double alpha) {
@@ -199,25 +199,23 @@ int main(int argc, char **argv) {
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
-    if (rank == 0) {
-        if (argc != 4) {
-            fprintf(stderr, "Usage : ./mr-pr-mpi.o ${filename}.txt -o ${filename}-pr-mpi.txt\n");
-            exit(1);
-        }
-        // argc == 4
-        if (strcmp(argv[2], "-o")) {
-            fprintf(stderr, "flag `-o` expected but provided `%s`\n", argv[2]);
-            exit(1);
-        }
+    
+    if (argc != 4) {
+        if (rank == 0) fprintf(stderr, "Usage : ./mr-pr-mpi.o ${filename}.txt -o ${filename}-pr-mpi.txt\n");
+        MPI_Abort(MPI_COMM_WORLD,1);
     }
+    // argc == 4
+    if (strcmp(argv[2], "-o")) {
+        if (rank == 0) fprintf(stderr, "flag `-o` expected but provided `%s`\n", argv[2]);
+        MPI_Abort(MPI_COMM_WORLD,1);
+    }
+    
     
     // only 1 map worker
     int num_reduce = size - 2;   // 1 master and 1 map-worker
-    if (rank == 0) {
-        if (num_reduce <= 0) {
-            std::cerr << "number of processes spawned must be atleast 3 for doing pgrank using map-reduce, but only " << size << " spawned" << std::endl;
-            exit(1);
-        }
+    if (num_reduce <= 0) {
+        if (rank == 0) std::cerr << "number of processes spawned must be atleast 3 for doing pgrank using map-reduce, but only " << size << " spawned" << std::endl;
+        MPI_Abort(MPI_COMM_WORLD,1);
     }
     
     uint32_t start, end;
@@ -230,7 +228,7 @@ int main(int argc, char **argv) {
         if (rank == 0 || rank == 1) {
             // both master and map-worker parses the input file
             std::istream input_stream(&fb1);
-            parse_hlfile(input_stream, hyperlink);
+            parse_hlfile(input_stream, hyperlink, rank);
 
             if (rank == 0) {
                 // only master needs outgoing, and it also computes websize, hlinksize
