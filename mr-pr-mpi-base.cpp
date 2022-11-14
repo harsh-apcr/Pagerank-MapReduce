@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <unordered_map>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -13,11 +14,9 @@
 #include "mapreduce-7Apr14/src/keyvalue.h"
 
 using namespace MAPREDUCE_NS;
-
 std::unordered_map<std::uint32_t, std::uint32_t> num_outgoing;
 std::vector<std::pair<std::uint32_t, std::uint32_t>> hyperlink;
-std::uint32_t **incoming;
-std::uint32_t *incoming_nval;
+std::vector<std::vector<std::uint32_t>> incoming;
 
 int hlinksize;
 int websize;
@@ -39,14 +38,15 @@ std::vector<std::string> split(const std::string &s, char seperator) {
 
 
 std::vector<double>
-run_pgrank(std::unordered_map<std::uint32_t, std::uint32_t> num_outgoing,
+run_pgrank(std::vector<std::vector<std::uint32_t>> &incoming,
+        std::unordered_map<std::uint32_t, std::uint32_t> &num_outgoing,
         double convergence,
         int max_iterations,
         double alpha) {
 
     // incoming[i] = vector of all pg ids that have a link to pg i
     // num_outgoing[i] = number of outgoing links out of pg i
-    int n = websize;
+    int n = incoming.size();    // websize
     double sum_pr;
     double dangling_pr;
     double diff = 1;
@@ -93,10 +93,9 @@ run_pgrank(std::unordered_map<std::uint32_t, std::uint32_t> num_outgoing,
         for(unsigned i = 0;i < n;i++) {
             /* The corresponding element of the H multiplication */
             double h = 0.0;
-            unsigned sz = incoming_nval[i];
-            for(unsigned j = 0;j < sz;j++) {
-                std::uint32_t pg = incoming[i][j];
+            for(int pg : incoming[i]) {
                 // pg -> i
+                assert(num_outgoing[pg]);   // TODO: remove this after testing
                 h += 1.0 / num_outgoing[pg] * old_pr[pg];
             }
             h *= alpha;
@@ -110,31 +109,43 @@ run_pgrank(std::unordered_map<std::uint32_t, std::uint32_t> num_outgoing,
     return pr;
 }
 
-void fileread(int rank, KeyValue *kv, void *ptr) {
+void fileread(int rank, KeyValue *kv, void* /*ptr*/) {
     int size;
     MPI_Comm_size(MPI_COMM_WORLD, &size);
-    for (int i = rank * (hlinksize / size); i < (rank+1) * (hlinksize / size); i++) {
+
+    int start = rank * (hlinksize / size);
+    int end = (rank + 1) * (hlinksize / size);
+    if (rank == size-1)
+        end = hlinksize;
+
+    for (int i = start; i < end; i++) {
         kv->add((char *) &hyperlink[i].second,sizeof(std::uint32_t),    // key
                 (char *) &hyperlink[i].first,sizeof(std::uint32_t));    // val
+        // printf("key : %d, val : %d added\n", hyperlink[i].second, hyperlink[i].first);
     }
 }
 
 void collect_incoming(uint64_t /*itask*/, char *key, int keybytes, 
     char *value, int valuebytes, KeyValue *kv, void * ptr) {
-
+    
     int rank = *reinterpret_cast<int*>(ptr);
     if (rank != 0) return;
     
     std::uint32_t k = *reinterpret_cast<std::uint32_t*>(key);
-    incoming[k] = reinterpret_cast<std::uint32_t*>(value);
-    incoming_nval[k] = valuebytes / sizeof(std::uint32_t);
-    kv->add(key, keybytes, value, valuebytes);
+    int nvalues = valuebytes / sizeof(std::uint32_t);
+    std::uint32_t *val = reinterpret_cast<std::uint32_t*>(value);
+    for(int i = 0;i < nvalues; i++) {
+        assert(val[i] < websize && val[i] >= 0);
+        incoming[k].push_back(val[i]);
+    }
 }
 
 void collect(char *key, int keybytes, char *multivalue,
  int nvalues, int *valuebytes, KeyValue *kv, void *ptr) {
     kv->add(key, keybytes, multivalue, sizeof(std::uint32_t) * nvalues);
 }
+
+
 
 int main(int argc, char **argv) {
     MPI_Init(&argc, &argv);
@@ -152,7 +163,7 @@ int main(int argc, char **argv) {
         if (rank == 0) fprintf(stderr, "flag `-o` expected but provided `%s`\n", argv[2]);
         MPI_Abort(MPI_COMM_WORLD,1);
     }
-
+    
     std::filebuf fb1;
     if (fb1.open(argv[1], std::ios::in)) {
         std::istream input_stream(&fb1);
@@ -167,8 +178,8 @@ int main(int argc, char **argv) {
             }
             // regex match
             std::vector<std::string> link = split(line, ' ');
-            int pg1 = std::stoi(link[0]);
-            int pg2 = std::stoi(link[1]);
+            uint pg1 = std::stoi(link[0]);
+            uint pg2 = std::stoi(link[1]);
             hyperlink.push_back(std::make_pair(pg1, pg2));
             num_outgoing[pg1]++;
             
@@ -182,40 +193,37 @@ int main(int argc, char **argv) {
     } else {
         std::cerr << "cannot open file `" << argv[1] << "`" << std::endl;
     }
-
     hlinksize = hyperlink.size();
     MapReduce *mr = new MapReduce(MPI_COMM_WORLD);
     MPI_Barrier(MPI_COMM_WORLD);
     double start = MPI_Wtime();
 
     mr->map(size, fileread, NULL);
-    mr->collate(NULL);              // kv -> kmv
+    mr->collate(NULL);
     mr->reduce(collect, NULL);
-
-    MPI_Barrier(MPI_COMM_WORLD);
-    double stop = MPI_Wtime();
-    if (rank == 0)
-        std::cout << "\nBaseMPI-MapReduce job finished in " << (stop - start) << " s" << std::endl;
-    
     mr->gather(1);
-
     if (rank == 0) {
-        incoming = new std::uint32_t*[websize];
-        memset(incoming, 0, sizeof(std::uint32_t) * websize);
-        incoming_nval = new std::uint32_t[websize];
-        memset(incoming_nval, 0, sizeof(std::uint32_t) * websize);
+        incoming.resize(websize);
     }
-
     mr->map(mr, collect_incoming, &rank);
+    if (rank == 0) {   
+        double stop = MPI_Wtime();
+        std::cout << "\nBaseMPI-MapReduce job finished in " << (stop - start) << " s" << std::endl;
 
-    if (rank == 0) {
+        // ===== DEBUG verify incoming vector =====
+        // for(unsigned i = 0;i < websize;i++) {
+        //     printf("incoming for page %d : ", i);
+        //     for(int pg : incoming[i]) {
+        //         printf("%d ", pg);
+        //     }
+        //     printf("\n");
+        // }
+        // ===== DEBUG verify incoming vector =====
+
         auto pgstart = std::chrono::high_resolution_clock::now();
-        auto pgrankv = run_pgrank(num_outgoing, DEFAULT_CONVERGENCE, DEFAULT_MAX_ITERATIONS, DEFAULT_ALPHA);
+        auto pgrankv = run_pgrank(incoming, num_outgoing, DEFAULT_CONVERGENCE, DEFAULT_MAX_ITERATIONS, DEFAULT_ALPHA);
         auto pgend = std::chrono::high_resolution_clock::now();
 
-        delete mr;
-        delete [] incoming;
-        delete [] incoming_nval;
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(pgend - pgstart);
         std::cout << "\nPagerank algorithm finished in " << duration.count() << "us" << std::endl;
 
@@ -235,5 +243,7 @@ int main(int argc, char **argv) {
         }
 
     }
+    
     MPI_Finalize();
+
 }
